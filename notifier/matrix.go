@@ -88,26 +88,106 @@ func SendMatrix(event models.Event, snapshot io.Reader, provider notifMeta) {
 		return
 	}
 
-	// Send snapshot image if available
-	if event.HasSnapshot {
-		var media *mautrix.RespMediaUpload
-		img, _ := io.ReadAll(snapshot)
-		media, _ = m.UploadMedia(context.Background(), mautrix.ReqUploadMedia{ContentBytes: img, ContentType: "image/jpeg", FileName: "snapshot.jpg"})
-		_, err = m.SendMessageEvent(context.Background(), id.RoomID(profile.RoomID), evt.EventMessage, &evt.MessageEventContent{
-			MsgType: evt.MsgImage,
-			Body:    "snapshot.jpg",
-			URL:     media.ContentURI.CUString(),
-			Info:    &evt.FileInfo{MimeType: "image/jpeg"},
-		})
-		if err != nil {
+	// Collect event clip if available & configured
+	var clip io.Reader
+	if event.HasClip && profile.SendClip {
+		clip = GetClip(event)
+		if clip == nil {
+			event.HasClip = false
+		}
+	}
+
+	// Send media: prefer clip, fallback to snapshot
+	if event.HasClip && profile.SendClip {
+		vid, readErr := io.ReadAll(clip)
+		if readErr != nil {
 			log.Warn().
 				Str("event_id", event.ID).
 				Str("provider", "Matrix").
 				Int("provider_id", provider.index).
-				Err(err).
-				Msg("Unable to send alert")
-			status.NotifFailure(err.Error())
-			return
+				Err(readErr).
+				Msg("Unable to read clip")
+			status.NotifFailure(readErr.Error())
+		} else {
+			media, uploadErr := m.UploadMedia(context.Background(), mautrix.ReqUploadMedia{
+				ContentBytes: vid,
+				ContentType:  "video/mp4",
+				FileName:     "clip.mp4",
+			})
+			if uploadErr != nil {
+				log.Warn().
+					Str("event_id", event.ID).
+					Str("provider", "Matrix").
+					Int("provider_id", provider.index).
+					Err(uploadErr).
+					Msg("Unable to upload clip")
+				status.NotifFailure(uploadErr.Error())
+			} else {
+				_, sendErr := m.SendMessageEvent(context.Background(), id.RoomID(profile.RoomID), evt.EventMessage, &evt.MessageEventContent{
+					MsgType: evt.MsgVideo,
+					Body:    "clip.mp4",
+					URL:     media.ContentURI.CUString(),
+					Info: &evt.FileInfo{
+						MimeType: "video/mp4",
+						Size:     len(vid),
+					},
+				})
+				if sendErr != nil {
+					log.Warn().
+						Str("event_id", event.ID).
+						Str("provider", "Matrix").
+						Int("provider_id", provider.index).
+						Err(sendErr).
+						Msg("Unable to send clip")
+					status.NotifFailure(sendErr.Error())
+				}
+			}
+		}
+	} else if event.HasSnapshot {
+		// Send snapshot image if available
+		img, readErr := io.ReadAll(snapshot)
+		if readErr != nil {
+			log.Warn().
+				Str("event_id", event.ID).
+				Str("provider", "Matrix").
+				Int("provider_id", provider.index).
+				Err(readErr).
+				Msg("Unable to read snapshot")
+			status.NotifFailure(readErr.Error())
+		} else {
+			media, uploadErr := m.UploadMedia(context.Background(), mautrix.ReqUploadMedia{
+				ContentBytes: img,
+				ContentType:  "image/jpeg",
+				FileName:     "snapshot.jpg",
+			})
+			if uploadErr != nil {
+				log.Warn().
+					Str("event_id", event.ID).
+					Str("provider", "Matrix").
+					Int("provider_id", provider.index).
+					Err(uploadErr).
+					Msg("Unable to upload snapshot")
+				status.NotifFailure(uploadErr.Error())
+			} else {
+				_, sendErr := m.SendMessageEvent(context.Background(), id.RoomID(profile.RoomID), evt.EventMessage, &evt.MessageEventContent{
+					MsgType: evt.MsgImage,
+					Body:    "snapshot.jpg",
+					URL:     media.ContentURI.CUString(),
+					Info: &evt.FileInfo{
+						MimeType: "image/jpeg",
+						Size:     len(img),
+					},
+				})
+				if sendErr != nil {
+					log.Warn().
+						Str("event_id", event.ID).
+						Str("provider", "Matrix").
+						Int("provider_id", provider.index).
+						Err(sendErr).
+						Msg("Unable to send snapshot")
+					status.NotifFailure(sendErr.Error())
+				}
+			}
 		}
 	}
 
