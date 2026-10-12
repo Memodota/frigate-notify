@@ -88,4 +88,9 @@ var DefaultConfig Config = Config{
 		Interval: 60,
 		Insecure: false,
 	},
+	Summary: models.Summary{
+		Enabled:  false,
+		Schedule: "0 9 * * *",
+		Days:     1,
+	},
 }

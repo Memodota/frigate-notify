@@ -20,6 +20,7 @@ import (
 	"github.com/0x2142/frigate-notify/events"
 	"github.com/0x2142/frigate-notify/notifier"
 	"github.com/0x2142/frigate-notify/util"
+	"github.com/robfig/cron/v3"
 )
 
 var debug, debugenv bool
@@ -108,6 +109,25 @@ func main() {
 	config.Load()
 
 	notifier.TemplateFiles = NotifTemplates
+
+	// Set up daily summary scheduler
+	if config.ConfigData.Summary.Enabled {
+		c := cron.New()
+		spec := config.ConfigData.Summary.Schedule
+		if spec == "" {
+			spec = "0 9 * * *"
+		}
+		_, err := c.AddFunc(spec, func() {
+			notifier.SendSummary()
+		})
+		if err != nil {
+			log.Error().Err(err).Str("schedule", spec).Msg("Failed to configure summary cron")
+		} else {
+			c.Start()
+			defer c.Stop()
+			log.Info().Str("schedule", spec).Msg("Summary scheduler started")
+		}
+	}
 
 	// Set up monitor
 	if config.ConfigData.Monitor.Enabled {

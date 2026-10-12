@@ -17,6 +17,7 @@ require (
 	github.com/knadh/koanf/v2 v2.3.0
 	github.com/mattn/go-sqlite3 v1.14.28
 	github.com/maypok86/otter v1.2.4
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/rs/zerolog v1.34.0
 	github.com/tidwall/sjson v1.2.5
 	github.com/wneessen/go-mail v0.7.2
