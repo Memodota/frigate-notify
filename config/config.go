@@ -24,6 +24,7 @@ type Config struct {
 	Frigate models.Frigate `koanf:"frigate" json:"frigate" required:"true"`
 	Alerts  models.Alerts  `koanf:"alerts" json:"alerts" required:"true"`
 	Monitor models.Monitor `koanf:"monitor" json:"monitor" required:"false"`
+	Summary models.Summary `koanf:"summary" json:"summary" required:"false"`
 }
 
 var ConfigData Config
@@ -164,3 +165,5 @@ func processENV(s, v string) (string, interface{}) {
 
 	return key, v
 }
+
+

@@ -241,3 +241,9 @@ type Monitor struct {
 	Interval int    `koanf:"interval" json:"interval,omitempty" minimum:"1" maximum:"10000000" doc:"Interval between check-in messages" default:"60"`
 	Insecure bool   `koanf:"ignoressl" json:"ignoressl,omitempty" enum:"true,false" doc:"Ignore TLS/SSL errors" default:"false"`
 }
+
+type Summary struct {
+    Enabled  bool   `koanf:"enabled" json:"enabled" enum:"true,false" doc:"Enable daily summary notifications" default:"false"`
+    Schedule string `koanf:"schedule" json:"schedule,omitempty" doc:"Cron expression for summary send time" default:"0 9 * * *"`
+    Days     int    `koanf:"days" json:"days,omitempty" minimum:"1" maximum:"365" doc:"Days back to summarize" default:"1"`
+}
