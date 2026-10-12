@@ -161,6 +161,7 @@ type Matrix struct {
 	Password    string `koanf:"password" json:"password,omitempty" doc:"Matrix password" default:""`
 	RoomID      string `koanf:"roomid" json:"roomid,omitempty" doc:"Room ID to send notifications to" default:""`
 	Insecure    bool   `koanf:"ignoressl" json:"ignoressl,omitempty" doc:"Ignore TLS/SSL errors" default:"false"`
+	SendClip    bool   `koanf:"send_clip" json:"send_clip,omitempty" doc:"Send event video clip instead of snapshot image" default:"false"`
 }
 
 type Mattermost struct {
