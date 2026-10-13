@@ -1,6 +1,7 @@
 package notifier
 
 import (
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -19,13 +20,17 @@ var DefaultRetry = RetryConfig{
 	MaxAttempts: 3,
 	BaseDelay:   5 * time.Second,
 	Backoff:     2.0,
-	MaxDelay:    120 * time.Second,
+	MaxDelay:    60 * time.Second,
 }
 
 // retrySend вызывает send до MaxAttempts раз с экспоненциальной паузой.
 // Возвращает последнюю ошибку, если все попытки провалились.
 //
 // `provider` и `providerID` используются только для логирования.
+//
+// Особый случай: если ошибка похожа на HTTP 429 (rate limit),
+// пауза перед следующей попыткой умножается, чтобы дать
+// удалённому серверу передышку.
 func retrySend(provider string, providerID int, cfg RetryConfig, send func() error) error {
 	if cfg.MaxAttempts < 1 {
 		cfg.MaxAttempts = 1
@@ -60,14 +65,41 @@ func retrySend(provider string, providerID int, cfg RetryConfig, send func() err
 			break
 		}
 
-		// Пауза перед следующей попыткой
+		// Базовая пауза, ограниченная MaxDelay
 		sleep := delay
 		if sleep > cfg.MaxDelay {
 			sleep = cfg.MaxDelay
 		}
+
+		// Для 429 (rate limit) — увеличиваем паузу, чтобы дать серверу передышку.
+		// Matrix, Synapse и большинство API при 429 явно просят «подождать».
+		// Множитель подбираем так, чтобы при BaseDelay=5s пауза стала ~20s.
+		if isRateLimited(err) {
+			sleep = sleep * 4
+			if sleep > cfg.MaxDelay {
+				sleep = cfg.MaxDelay
+			}
+			log.Debug().
+				Str("provider", provider).
+				Int("provider_id", providerID).
+				Dur("sleep", sleep).
+				Msg("Rate limited, extending pause before retry")
+		}
+
 		time.Sleep(sleep)
 		delay = time.Duration(float64(delay) * cfg.Backoff)
 	}
 
 	return lastErr
+}
+
+// isRateLimited определяет, похожа ли ошибка на HTTP 429 / Too Many Requests.
+func isRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "too many requests") ||
+		strings.Contains(msg, "m_limit_exceeded") ||
+		strings.Contains(msg, "429")
 }
