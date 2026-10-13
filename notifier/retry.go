@@ -17,10 +17,10 @@ type RetryConfig struct {
 
 // DefaultRetry — разумные значения по умолчанию.
 var DefaultRetry = RetryConfig{
-	MaxAttempts: 3,
+	MaxAttempts: 10,
 	BaseDelay:   5 * time.Second,
-	Backoff:     2.0,
-	MaxDelay:    60 * time.Second,
+	Backoff:     5.0,
+	MaxDelay:    7200 * time.Second,
 }
 
 // retrySend вызывает send до MaxAttempts раз с экспоненциальной паузой.
