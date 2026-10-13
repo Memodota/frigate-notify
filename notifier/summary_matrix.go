@@ -15,8 +15,16 @@ import (
 	"github.com/0x2142/frigate-notify/config"
 )
 
-// sendMatrixSummary отправляет простое текстовое сообщение в Matrix.
+// sendMatrixSummary отправляет простое текстовое сообщение в Matrix,
+// используя retry при неудачах.
 func sendMatrixSummary(message string, idx int) error {
+	return retrySend("Matrix", idx, DefaultRetry, func() error {
+		return trySendMatrix(message, idx)
+	})
+}
+
+// trySendMatrix — одна попытка отправки. Возвращает ошибку при неудаче.
+func trySendMatrix(message string, idx int) error {
 	profile := config.ConfigData.Alerts.Matrix[idx]
 
 	m, err := mautrix.NewClient(profile.Server, "", "")
@@ -48,7 +56,6 @@ func sendMatrixSummary(message string, idx int) error {
 	}
 	m.Crypto = ch
 
-	// Присоединяемся к комнате (на случай, если ещё не в ней)
 	if _, err := m.JoinRoomByID(context.Background(), id.RoomID(profile.RoomID)); err != nil {
 		log.Warn().Err(err).Msg("summary: join room")
 	}
