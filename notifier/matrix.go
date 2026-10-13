@@ -106,12 +106,11 @@ func trySendMatrixEvent(profile models.Matrix, message string, clipBytes, snapsh
 
 	// Ignore self-signed certs if set
 	if profile.Insecure {
-		m.Client = &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
+		Timeout: 5 * time.Minute, // загрузка клипа может занимать минуты
+    	Transport: &http.Transport{
+        	TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+        	ResponseHeaderTimeout: 60 * time.Second, // отдельно — ожидание заголовков
+    	},
 	}
 
 	// Handle login
