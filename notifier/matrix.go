@@ -18,63 +18,193 @@ import (
 	"github.com/0x2142/frigate-notify/models"
 )
 
-// SendMatrix pushes alert message to Matrix chat via webhook.
-// Retries the whole send path (login → join → media → text) on failure.
+// SendMatrix pushes alert message to Matrix chat via webhook
 func SendMatrix(event models.Event, snapshot io.Reader, provider notifMeta) {
 	profile := config.ConfigData.Alerts.Matrix[provider.index]
 	status := &config.Internal.Status.Notifications.Matrix[provider.index]
 
-	// Build notification
+	var err error
 	var message string
+	// Build notification
 	if profile.Template != "" {
 		message = renderMessage(profile.Template, event, "message", "Matrix")
 	} else {
 		message = renderMessage("html", event, "message", "Matrix")
 	}
 
-	// Pre-read media into memory once, so retry can reuse the bytes.
-	var clipBytes, snapshotBytes []byte
+	// New matrix client
+	m, err := mautrix.NewClient(profile.Server, "", "")
+	if err != nil {
+		log.Warn().
+			Str("event_id", event.ID).
+			Str("provider", "Matrix").
+			Err(err).
+			Int("provider_id", provider.index).
+			Msg("Unable to send alert")
+		status.NotifFailure(err.Error())
+		return
+	}
 
-	if event.HasClip && profile.SendClip {
-		clip := GetClip(event)
-		if clip == nil {
-			log.Warn().
-				Str("event_id", event.ID).
-				Str("provider", "Matrix").
-				Int("provider_id", provider.index).
-				Msg("Clip not available, will fall back to snapshot")
-		} else {
-			var readErr error
-			clipBytes, readErr = io.ReadAll(clip)
-			if readErr != nil {
-				log.Warn().
-					Str("event_id", event.ID).
-					Str("provider", "Matrix").
-					Int("provider_id", provider.index).
-					Err(readErr).
-					Msg("Unable to read clip, will fall back to snapshot")
-				clipBytes = nil
-			}
+	// Ignore self-signed certs if set + extend timeout for media uploads
+	if profile.Insecure {
+		m.Client = &http.Client{
+			Timeout: 5 * time.Minute,
+			Transport: &http.Transport{
+				TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+				ResponseHeaderTimeout: 60 * time.Second,
+			},
+		}
+	} else {
+		m.Client = &http.Client{
+			Timeout: 5 * time.Minute,
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: 60 * time.Second,
+			},
 		}
 	}
 
-	if len(clipBytes) == 0 && event.HasSnapshot {
-		var readErr error
-		snapshotBytes, readErr = io.ReadAll(snapshot)
+	// Handle login
+	m.StateStore = mautrix.NewMemoryStateStore()
+	ch, err := cryptohelper.NewCryptoHelper(m, []byte("asdf"), "./matrix.db")
+	if err != nil {
+		log.Warn().
+			Str("event_id", event.ID).
+			Str("provider", "Matrix").
+			Err(err).
+			Int("provider_id", provider.index).
+			Msg("Unable to send alert")
+		status.NotifFailure(err.Error())
+		return
+	}
+	ch.LoginAs = &mautrix.ReqLogin{
+		Type:       mautrix.AuthTypePassword,
+		Identifier: mautrix.UserIdentifier{Type: mautrix.IdentifierTypeUser, User: profile.Username},
+		Password:   profile.Password,
+	}
+	ch.Init(context.Background())
+	m.Crypto = ch
+
+	// Join room if needed
+	_, err = m.JoinRoomByID(context.Background(), id.RoomID(profile.RoomID))
+	if err != nil {
+		log.Warn().
+			Str("event_id", event.ID).
+			Str("provider", "Matrix").
+			Int("provider_id", provider.index).
+			Err(err).
+			Msg("Unable to send alert")
+		status.NotifFailure(err.Error())
+		return
+	}
+
+	// Collect event clip if available & configured
+	var clip io.Reader
+	if event.HasClip && profile.SendClip {
+		clip = GetClip(event)
+		if clip == nil {
+			event.HasClip = false
+		}
+	}
+
+	// Send media: prefer clip, fallback to snapshot
+	if event.HasClip && profile.SendClip {
+		vid, readErr := io.ReadAll(clip)
 		if readErr != nil {
 			log.Warn().
 				Str("event_id", event.ID).
 				Str("provider", "Matrix").
 				Int("provider_id", provider.index).
 				Err(readErr).
-				Msg("Unable to read snapshot, sending text only")
-			snapshotBytes = nil
+				Msg("Unable to read clip")
+			status.NotifFailure(readErr.Error())
+		} else {
+			media, uploadErr := m.UploadMedia(context.Background(), mautrix.ReqUploadMedia{
+				ContentBytes: vid,
+				ContentType:  "video/mp4",
+				FileName:     "clip.mp4",
+			})
+			if uploadErr != nil {
+				log.Warn().
+					Str("event_id", event.ID).
+					Str("provider", "Matrix").
+					Int("provider_id", provider.index).
+					Err(uploadErr).
+					Msg("Unable to upload clip")
+				status.NotifFailure(uploadErr.Error())
+			} else {
+				_, sendErr := m.SendMessageEvent(context.Background(), id.RoomID(profile.RoomID), evt.EventMessage, &evt.MessageEventContent{
+					MsgType: evt.MsgVideo,
+					Body:    "clip.mp4",
+					URL:     media.ContentURI.CUString(),
+					Info: &evt.FileInfo{
+						MimeType: "video/mp4",
+						Size:     len(vid),
+					},
+				})
+				if sendErr != nil {
+					log.Warn().
+						Str("event_id", event.ID).
+						Str("provider", "Matrix").
+						Int("provider_id", provider.index).
+						Err(sendErr).
+						Msg("Unable to send clip")
+					status.NotifFailure(sendErr.Error())
+				}
+			}
+		}
+	} else if event.HasSnapshot {
+		// Send snapshot image if available
+		img, readErr := io.ReadAll(snapshot)
+		if readErr != nil {
+			log.Warn().
+				Str("event_id", event.ID).
+				Str("provider", "Matrix").
+				Int("provider_id", provider.index).
+				Err(readErr).
+				Msg("Unable to read snapshot")
+			status.NotifFailure(readErr.Error())
+		} else {
+			media, uploadErr := m.UploadMedia(context.Background(), mautrix.ReqUploadMedia{
+				ContentBytes: img,
+				ContentType:  "image/jpeg",
+				FileName:     "snapshot.jpg",
+			})
+			if uploadErr != nil {
+				log.Warn().
+					Str("event_id", event.ID).
+					Str("provider", "Matrix").
+					Int("provider_id", provider.index).
+					Err(uploadErr).
+					Msg("Unable to upload snapshot")
+				status.NotifFailure(uploadErr.Error())
+			} else {
+				_, sendErr := m.SendMessageEvent(context.Background(), id.RoomID(profile.RoomID), evt.EventMessage, &evt.MessageEventContent{
+					MsgType: evt.MsgImage,
+					Body:    "snapshot.jpg",
+					URL:     media.ContentURI.CUString(),
+					Info: &evt.FileInfo{
+						MimeType: "image/jpeg",
+						Size:     len(img),
+					},
+				})
+				if sendErr != nil {
+					log.Warn().
+						Str("event_id", event.ID).
+						Str("provider", "Matrix").
+						Int("provider_id", provider.index).
+						Err(sendErr).
+						Msg("Unable to send snapshot")
+					status.NotifFailure(sendErr.Error())
+				}
+			}
 		}
 	}
 
-	// Send with retry
-	err := retrySend("Matrix", provider.index, DefaultRetry, func() error {
-		return trySendMatrixEvent(profile, message, clipBytes, snapshotBytes)
+	// Send event details
+	_, err = m.SendMessageEvent(context.Background(), id.RoomID(profile.RoomID), evt.EventMessage, &evt.MessageEventContent{
+		MsgType:       evt.MsgText,
+		Format:        "org.matrix.custom.html",
+		FormattedBody: message,
 	})
 	if err != nil {
 		log.Warn().
@@ -82,7 +212,7 @@ func SendMatrix(event models.Event, snapshot io.Reader, provider notifMeta) {
 			Str("provider", "Matrix").
 			Int("provider_id", provider.index).
 			Err(err).
-			Msg("Unable to send alert after retries")
+			Msg("Unable to send alert")
 		status.NotifFailure(err.Error())
 		return
 	}
@@ -93,90 +223,4 @@ func SendMatrix(event models.Event, snapshot io.Reader, provider notifMeta) {
 		Int("provider_id", provider.index).
 		Msg("Alert sent")
 	status.NotifSuccess()
-}
-
-// trySendMatrixEvent — одна попытка отправки события:
-// login → join → media (clip или snapshot) → text.
-// Возвращает ошибку на первом же сбое, чтобы retrySend мог повторить.
-func trySendMatrixEvent(profile models.Matrix, message string, clipBytes, snapshotBytes []byte) error {
-	m, err := mautrix.NewClient(profile.Server, "", "")
-	if err != nil {
-		return err
-	}
-
-	// Ignore self-signed certs if set
-	if profile.Insecure {
-		Timeout: 5 * time.Minute, // загрузка клипа может занимать минуты
-    	Transport: &http.Transport{
-        	TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-        	ResponseHeaderTimeout: 60 * time.Second, // отдельно — ожидание заголовков
-    	},
-	}
-
-	// Handle login
-	m.StateStore = mautrix.NewMemoryStateStore()
-	ch, err := cryptohelper.NewCryptoHelper(m, []byte("asdf"), "./matrix.db")
-	if err != nil {
-		return err
-	}
-	ch.LoginAs = &mautrix.ReqLogin{
-		Type:       mautrix.AuthTypePassword,
-		Identifier: mautrix.UserIdentifier{Type: mautrix.IdentifierTypeUser, User: profile.Username},
-		Password:   profile.Password,
-	}
-	if err := ch.Init(context.Background()); err != nil {
-		return err
-	}
-	m.Crypto = ch
-
-	// Join room if needed
-	if _, err := m.JoinRoomByID(context.Background(), id.RoomID(profile.RoomID)); err != nil {
-		return err
-	}
-
-	// Send media: prefer clip, fallback to snapshot
-	if len(clipBytes) > 0 {
-		if err := sendMatrixMedia(m, profile, clipBytes, "video/mp4", "clip.mp4", evt.MsgVideo); err != nil {
-			return err
-		}
-	} else if len(snapshotBytes) > 0 {
-		if err := sendMatrixMedia(m, profile, snapshotBytes, "image/jpeg", "snapshot.jpg", evt.MsgImage); err != nil {
-			return err
-		}
-	}
-
-	// Send event details
-	_, err = m.SendMessageEvent(context.Background(),
-		id.RoomID(profile.RoomID), evt.EventMessage,
-		&evt.MessageEventContent{
-			MsgType:       evt.MsgText,
-			Format:        "org.matrix.custom.html",
-			FormattedBody: message,
-		})
-	return err
-}
-
-// sendMatrixMedia загружает байты в Matrix и отправляет их как сообщение.
-func sendMatrixMedia(m *mautrix.Client, profile models.Matrix, data []byte, contentType, fileName string, msgType evt.MessageType) error {
-	media, err := m.UploadMedia(context.Background(), mautrix.ReqUploadMedia{
-		ContentBytes: data,
-		ContentType:  contentType,
-		FileName:     fileName,
-	})
-	if err != nil {
-		return err
-	}
-
-	_, err = m.SendMessageEvent(context.Background(),
-		id.RoomID(profile.RoomID), evt.EventMessage,
-		&evt.MessageEventContent{
-			MsgType: msgType,
-			Body:    fileName,
-			URL:     media.ContentURI.CUString(),
-			Info: &evt.FileInfo{
-				MimeType: contentType,
-				Size:     len(data),
-			},
-		})
-	return err
 }
