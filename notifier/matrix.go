@@ -35,63 +35,6 @@ func SendMatrix(event models.Event, snapshot io.Reader, provider notifMeta) {
 	// Pre-read media into memory once, so retry can reuse the bytes.
 	var clipBytes, snapshotBytes []byte
 
-<<<<<<< Updated upstream
-	// Ignore self-signed certs if set
-	if profile.Insecure {
-		httpClient := &http.Client{Timeout: 10 * time.Second}
-		// Ignore SSL verification if set
-		httpClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-		m.Client = httpClient
-	}
-
-	// Handle login
-	m.StateStore = mautrix.NewMemoryStateStore()
-	ch, err := cryptohelper.NewCryptoHelper(m, []byte("asdf"), "./matrix.db")
-	if err != nil {
-		log.Warn().
-			Str("event_id", event.ID).
-			Str("provider", "Matrix").
-			Err(err).
-			Int("provider_id", provider.index).
-			Msg("Unable to send alert")
-		status.NotifFailure(err.Error())
-		return
-	}
-	ch.LoginAs = &mautrix.ReqLogin{
-		Type:       mautrix.AuthTypePassword,
-		Identifier: mautrix.UserIdentifier{Type: mautrix.IdentifierTypeUser, User: profile.Username},
-		Password:   profile.Password,
-	}
-	ch.Init(context.Background())
-	m.Crypto = ch
-
-	// Join room if needed
-	_, err = m.JoinRoomByID(context.Background(), id.RoomID(profile.RoomID))
-	if err != nil {
-		log.Warn().
-			Str("event_id", event.ID).
-			Str("provider", "Matrix").
-			Int("provider_id", provider.index).
-			Err(err).
-			Msg("Unable to send alert")
-		status.NotifFailure(err.Error())
-		return
-	}
-
-	// Send snapshot image if available
-	if event.HasSnapshot {
-		var media *mautrix.RespMediaUpload
-		img, _ := io.ReadAll(snapshot)
-		media, _ = m.UploadMedia(context.Background(), mautrix.ReqUploadMedia{ContentBytes: img, ContentType: "image/jpeg", FileName: "snapshot.jpg"})
-		_, err = m.SendMessageEvent(context.Background(), id.RoomID(profile.RoomID), evt.EventMessage, &evt.MessageEventContent{
-			MsgType: evt.MsgImage,
-			Body:    "snapshot.jpg",
-			URL:     media.ContentURI.CUString(),
-			Info:    &evt.FileInfo{MimeType: "image/jpeg"},
-		})
-		if err != nil {
-=======
 	if event.HasClip && profile.SendClip {
 		clip := GetClip(event)
 		if clip == nil {
@@ -119,21 +62,13 @@ func SendMatrix(event models.Event, snapshot io.Reader, provider notifMeta) {
 		var readErr error
 		snapshotBytes, readErr = io.ReadAll(snapshot)
 		if readErr != nil {
->>>>>>> Stashed changes
 			log.Warn().
 				Str("event_id", event.ID).
 				Str("provider", "Matrix").
 				Int("provider_id", provider.index).
-<<<<<<< Updated upstream
-				Err(err).
-				Msg("Unable to send alert")
-			status.NotifFailure(err.Error())
-			return
-=======
 				Err(readErr).
 				Msg("Unable to read snapshot, sending text only")
 			snapshotBytes = nil
->>>>>>> Stashed changes
 		}
 	}
 

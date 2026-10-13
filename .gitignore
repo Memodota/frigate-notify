@@ -15,3 +15,6 @@ Taskfile.yaml
 mqttlogger/
 log/
 matrix.db*
+frigate-notify-linux
+frigate-notify
+frigate-notify.exe
