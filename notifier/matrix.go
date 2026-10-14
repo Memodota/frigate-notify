@@ -18,102 +18,31 @@ import (
 	"github.com/0x2142/frigate-notify/models"
 )
 
-// SendMatrix pushes alert message to Matrix chat via webhook.
-// Retries the whole send path (login → join → media → text) on failure.
+// SendMatrix pushes alert message to Matrix chat via webhook
 func SendMatrix(event models.Event, snapshot io.Reader, provider notifMeta) {
 	profile := config.ConfigData.Alerts.Matrix[provider.index]
 	status := &config.Internal.Status.Notifications.Matrix[provider.index]
 
-	// Build notification
+	var err error
 	var message string
+	// Build notification
 	if profile.Template != "" {
 		message = renderMessage(profile.Template, event, "message", "Matrix")
 	} else {
 		message = renderMessage("html", event, "message", "Matrix")
 	}
 
-	// Pre-read media into memory once, so retry can reuse the bytes.
-	var clipBytes, snapshotBytes []byte
-
-	// Snapshot — read first, primary artifact
-	if event.HasSnapshot {
-		var readErr error
-		snapshotBytes, readErr = io.ReadAll(snapshot)
-		if readErr != nil {
-			log.Warn().
-				Str("event_id", event.ID).
-				Str("provider", "Matrix").
-				Int("provider_id", provider.index).
-				Err(readErr).
-				Msg("Unable to read snapshot, sending text only")
-			snapshotBytes = nil
-		}
-	}
-
-	// Clip — read only if enabled and size fits within the limit.
-	if event.HasClip && profile.SendClip {
-		clip := GetClip(event)
-		if clip == nil {
-			log.Warn().
-				Str("event_id", event.ID).
-				Str("provider", "Matrix").
-				Int("provider_id", provider.index).
-				Msg("Clip not available, will fall back to snapshot")
-		} else {
-			var readErr error
-			clipBytes, readErr = io.ReadAll(clip)
-			if readErr != nil {
-				log.Warn().
-					Str("event_id", event.ID).
-					Str("provider", "Matrix").
-					Int("provider_id", provider.index).
-					Err(readErr).
-					Msg("Unable to read clip, will fall back to snapshot")
-				clipBytes = nil
-			} else if profile.MaxClipSizeMB > 0 && len(clipBytes) > profile.MaxClipSizeMB*1024*1024 {
-				log.Info().
-					Str("event_id", event.ID).
-					Str("provider", "Matrix").
-					Int("provider_id", provider.index).
-					Int("size_bytes", len(clipBytes)).
-					Int("limit_mb", profile.MaxClipSizeMB).
-					Msg("Clip exceeds size limit, will fall back to snapshot")
-				clipBytes = nil
-			}
-		}
-	}
-
-	// Send with retry
-	err := retrySend("Matrix", provider.index, DefaultRetry, func() error {
-		return trySendMatrixEvent(profile, message, clipBytes, snapshotBytes)
-	})
+	// New matrix client
+	m, err := mautrix.NewClient(profile.Server, "", "")
 	if err != nil {
 		log.Warn().
 			Str("event_id", event.ID).
 			Str("provider", "Matrix").
-			Int("provider_id", provider.index).
 			Err(err).
-			Msg("Unable to send alert after retries")
+			Int("provider_id", provider.index).
+			Msg("Unable to send alert")
 		status.NotifFailure(err.Error())
 		return
-	}
-
-	log.Info().
-		Str("event_id", event.ID).
-		Str("provider", "Matrix").
-		Int("provider_id", provider.index).
-		Msg("Alert sent")
-	status.NotifSuccess()
-}
-
-// trySendMatrixEvent — одна попытка отправки события:
-// login → join → snapshot → text → clip (if any).
-// Возвращает ошибку на первом же сбое, КРОМЕ отправки клипа:
-// если снапшот и текст уже ушли, клип больше не влияет на результат.
-func trySendMatrixEvent(profile models.Matrix, message string, clipBytes, snapshotBytes []byte) error {
-	m, err := mautrix.NewClient(profile.Server, "", "")
-	if err != nil {
-		return err
 	}
 
 	// Extended timeout for media uploads, self-signed certs if set
@@ -132,84 +61,117 @@ func trySendMatrixEvent(profile models.Matrix, message string, clipBytes, snapsh
 	m.StateStore = mautrix.NewMemoryStateStore()
 	ch, err := cryptohelper.NewCryptoHelper(m, []byte("asdf"), "./matrix.db")
 	if err != nil {
-		return err
+		log.Warn().
+			Str("event_id", event.ID).
+			Str("provider", "Matrix").
+			Err(err).
+			Int("provider_id", provider.index).
+			Msg("Unable to send alert")
+		status.NotifFailure(err.Error())
+		return
 	}
 	ch.LoginAs = &mautrix.ReqLogin{
 		Type:       mautrix.AuthTypePassword,
 		Identifier: mautrix.UserIdentifier{Type: mautrix.IdentifierTypeUser, User: profile.Username},
 		Password:   profile.Password,
 	}
-	if err := ch.Init(context.Background()); err != nil {
-		return err
-	}
+	ch.Init(context.Background())
 	m.Crypto = ch
 
 	// Join room if needed
-	if _, err := m.JoinRoomByID(context.Background(), id.RoomID(profile.RoomID)); err != nil {
-		return err
-	}
-
-	// 1. Snapshot first — quickest, most reliable artifact
-	if len(snapshotBytes) > 0 {
-		if err := sendMatrixMedia(m, profile, snapshotBytes, "image/jpeg", "snapshot.jpg", evt.MsgImage); err != nil {
-			return err
-		}
-	}
-
-	// 2. Text — the main event details
-	_, err = m.SendMessageEvent(context.Background(),
-		id.RoomID(profile.RoomID), evt.EventMessage,
-		&evt.MessageEventContent{
-			MsgType:       evt.MsgText,
-			Format:        "org.matrix.custom.html",
-			FormattedBody: message,
-		})
+	_, err = m.JoinRoomByID(context.Background(), id.RoomID(profile.RoomID))
 	if err != nil {
-		return err
+		log.Warn().
+			Str("event_id", event.ID).
+			Str("provider", "Matrix").
+			Int("provider_id", provider.index).
+			Err(err).
+			Msg("Unable to send alert")
+		status.NotifFailure(err.Error())
+		return
 	}
 
-	// 3. Clip last — failure here doesn't fail the whole attempt,
-	// because snapshot+text already went through. Swallow the error.
-	if len(clipBytes) > 0 {
-		if err := sendMatrixMedia(m, profile, clipBytes, "video/mp4", "clip.mp4", evt.MsgVideo); err != nil {
+	// ============================================================
+	// 1. СНАПШОТ — всегда и сразу (если есть)
+	// ============================================================
+	if event.HasSnapshot {
+		img, readErr := io.ReadAll(snapshot)
+		if readErr != nil {
 			log.Warn().
+				Str("event_id", event.ID).
 				Str("provider", "Matrix").
-				Int("provider_id", -1).
-				Int("size_bytes", len(clipBytes)).
-				Err(err).
-				Msg("Unable to send clip, but snapshot and text were delivered")
+				Int("provider_id", provider.index).
+				Err(readErr).
+				Msg("Unable to read snapshot")
+			status.NotifFailure(readErr.Error())
 		} else {
-			log.Info().
-				Str("provider", "Matrix").
-				Int("size_bytes", len(clipBytes)).
-				Msg("Clip sent")
+			media, uploadErr := m.UploadMedia(context.Background(), mautrix.ReqUploadMedia{
+				ContentBytes: img,
+				ContentType:  "image/jpeg",
+				FileName:     "snapshot.jpg",
+			})
+			if uploadErr != nil {
+				log.Warn().
+					Str("event_id", event.ID).
+					Str("provider", "Matrix").
+					Int("provider_id", provider.index).
+					Err(uploadErr).
+					Msg("Unable to upload snapshot")
+				status.NotifFailure(uploadErr.Error())
+			} else {
+				_, sendErr := m.SendMessageEvent(context.Background(), id.RoomID(profile.RoomID), evt.EventMessage, &evt.MessageEventContent{
+					MsgType: evt.MsgImage,
+					Body:    "snapshot.jpg",
+					URL:     media.ContentURI.CUString(),
+					Info: &evt.FileInfo{
+						MimeType: "image/jpeg",
+						Size:     len(img),
+					},
+				})
+				if sendErr != nil {
+					log.Warn().
+						Str("event_id", event.ID).
+						Str("provider", "Matrix").
+						Int("provider_id", provider.index).
+						Err(sendErr).
+						Msg("Unable to send snapshot")
+					status.NotifFailure(sendErr.Error())
+				}
+			}
 		}
 	}
 
-	return nil
-}
-
-// sendMatrixMedia загружает байты в Matrix и отправляет их как сообщение.
-func sendMatrixMedia(m *mautrix.Client, profile models.Matrix, data []byte, contentType, fileName string, msgType evt.MessageType) error {
-	media, err := m.UploadMedia(context.Background(), mautrix.ReqUploadMedia{
-		ContentBytes: data,
-		ContentType:  contentType,
-		FileName:     fileName,
+	// ============================================================
+	// 2. ТЕКСТ — основной артефакт события
+	// ============================================================
+	_, err = m.SendMessageEvent(context.Background(), id.RoomID(profile.RoomID), evt.EventMessage, &evt.MessageEventContent{
+		MsgType:       evt.MsgText,
+		Format:        "org.matrix.custom.html",
+		FormattedBody: message,
 	})
 	if err != nil {
-		return err
+		log.Warn().
+			Str("event_id", event.ID).
+			Str("provider", "Matrix").
+			Int("provider_id", provider.index).
+			Err(err).
+			Msg("Unable to send alert")
+		status.NotifFailure(err.Error())
+		return
 	}
 
-	_, err = m.SendMessageEvent(context.Background(),
-		id.RoomID(profile.RoomID), evt.EventMessage,
-		&evt.MessageEventContent{
-			MsgType: msgType,
-			Body:    fileName,
-			URL:     media.ContentURI.CUString(),
-			Info: &evt.FileInfo{
-				MimeType: contentType,
-				Size:     len(data),
-			},
-		})
-	return err
+	// ============================================================
+	// 3. КЛИП — асинхронно, в фоне, с retry.
+	// Снапшот и текст уже доставлены, поэтому не блокируем поток.
+	// ============================================================
+	if event.HasClip && profile.SendClip {
+		go sendClipWithRetry(event, profile, provider.index)
+	}
+
+	log.Info().
+		Str("event_id", event.ID).
+		Str("provider", "Matrix").
+		Int("provider_id", provider.index).
+		Msg("Alert sent")
+	status.NotifSuccess()
 }
