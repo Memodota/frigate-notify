@@ -18,32 +18,22 @@ import (
 	"github.com/0x2142/frigate-notify/models"
 )
 
-// SendMatrix pushes alert message to Matrix chat via webhook
+// SendMatrix pushes alert message to Matrix chat via webhook.
+// Retries the whole send path (login → join → media → text) on failure.
 func SendMatrix(event models.Event, snapshot io.Reader, provider notifMeta) {
 	profile := config.ConfigData.Alerts.Matrix[provider.index]
 	status := &config.Internal.Status.Notifications.Matrix[provider.index]
 
-	var err error
-	var message string
 	// Build notification
+	var message string
 	if profile.Template != "" {
 		message = renderMessage(profile.Template, event, "message", "Matrix")
 	} else {
 		message = renderMessage("html", event, "message", "Matrix")
 	}
 
-	// New matrix client
-	m, err := mautrix.NewClient(profile.Server, "", "")
-	if err != nil {
-		log.Warn().
-			Str("event_id", event.ID).
-			Str("provider", "Matrix").
-			Err(err).
-			Int("provider_id", provider.index).
-			Msg("Unable to send alert")
-		status.NotifFailure(err.Error())
-		return
-	}
+	// Pre-read media into memory once, so retry can reuse the bytes.
+	var clipBytes, snapshotBytes []byte
 
 	// Snapshot — read first, primary artifact
 	if event.HasSnapshot {
@@ -103,7 +93,7 @@ func SendMatrix(event models.Event, snapshot io.Reader, provider notifMeta) {
 			Str("provider", "Matrix").
 			Int("provider_id", provider.index).
 			Err(err).
-			Msg("Unable to send alert")
+			Msg("Unable to send alert after retries")
 		status.NotifFailure(err.Error())
 		return
 	}
