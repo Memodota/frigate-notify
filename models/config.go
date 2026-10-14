@@ -155,13 +155,14 @@ type Gotify struct {
 }
 
 type Matrix struct {
-	AlertCommon `koanf:",squash"`
-	Server      string `koanf:"server" json:"server,omitempty" doc:"Matrix Homeserver address" default:""`
-	Username    string `koanf:"username" json:"username,omitempty" doc:"Matrix username" default:""`
-	Password    string `koanf:"password" json:"password,omitempty" doc:"Matrix password" default:""`
-	RoomID      string `koanf:"roomid" json:"roomid,omitempty" doc:"Room ID to send notifications to" default:""`
-	Insecure    bool   `koanf:"ignoressl" json:"ignoressl,omitempty" doc:"Ignore TLS/SSL errors" default:"false"`
-	SendClip    bool   `koanf:"send_clip" json:"send_clip,omitempty" doc:"Send event video clip instead of snapshot image" default:"false"`
+	AlertCommon   `koanf:",squash"`
+	Server        string `koanf:"server" json:"server,omitempty" doc:"Matrix Homeserver address" default:""`
+	Username      string `koanf:"username" json:"username,omitempty" doc:"Matrix username" default:""`
+	Password      string `koanf:"password" json:"password,omitempty" doc:"Matrix password" default:""`
+	RoomID        string `koanf:"roomid" json:"roomid,omitempty" doc:"Room ID to send notifications to" default:""`
+	Insecure      bool   `koanf:"ignoressl" json:"ignoressl,omitempty" doc:"Ignore TLS/SSL errors" default:"false"`
+	SendClip      bool   `koanf:"send_clip" json:"send_clip,omitempty" doc:"Send event video clip instead of snapshot image" default:"false"`
+	MaxClipSizeMB int    `koanf:"max_clip_size_mb" json:"max_clip_size_mb,omitempty" doc:"Maximum clip size in MB to upload. 0 = no limit" default:"20" minimum:"0" maximum:"1000"`
 }
 
 type Mattermost struct {
@@ -243,7 +244,7 @@ type Monitor struct {
 }
 
 type Summary struct {
-    Enabled  bool   `koanf:"enabled" json:"enabled" enum:"true,false" doc:"Enable daily summary notifications" default:"false"`
-    Schedule string `koanf:"schedule" json:"schedule,omitempty" doc:"Cron expression for summary send time" default:"0 9 * * *"`
-    Days     int    `koanf:"days" json:"days,omitempty" minimum:"1" maximum:"365" doc:"Days back to summarize" default:"1"`
+	Enabled  bool   `koanf:"enabled" json:"enabled" enum:"true,false" doc:"Enable daily summary notifications" default:"false"`
+	Schedule string `koanf:"schedule" json:"schedule,omitempty" doc:"Cron expression for summary send time" default:"0 9 * * *"`
+	Days     int    `koanf:"days" json:"days,omitempty" minimum:"1" maximum:"365" doc:"Days back to summarize" default:"1"`
 }

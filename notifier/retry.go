@@ -15,12 +15,14 @@ type RetryConfig struct {
 	MaxDelay    time.Duration // Потолок паузы
 }
 
-// DefaultRetry — разумные значения по умолчанию.
+// DefaultRetry — для уведомлений о событиях и summary.
+// Скорость доставки не критична, важна надёжность:
+// длинные паузы, много попыток.
 var DefaultRetry = RetryConfig{
-	MaxAttempts: 10,
-	BaseDelay:   5 * time.Second,
-	Backoff:     5.0,
-	MaxDelay:    7200 * time.Second,
+	MaxAttempts: 6,
+	BaseDelay:   30 * time.Second,
+	Backoff:     2.0,
+	MaxDelay:    10 * time.Minute,
 }
 
 // retrySend вызывает send до MaxAttempts раз с экспоненциальной паузой.
@@ -28,9 +30,9 @@ var DefaultRetry = RetryConfig{
 //
 // `provider` и `providerID` используются только для логирования.
 //
-// Особый случай: если ошибка похожа на HTTP 429 (rate limit),
-// пауза перед следующей попыткой умножается, чтобы дать
-// удалённому серверу передышку.
+// Особые случаи:
+//   - 401/403/unauthorized — НЕ повторяем, это постоянная ошибка.
+//   - 429 (rate limit) — повторяем с увеличенной паузой.
 func retrySend(provider string, providerID int, cfg RetryConfig, send func() error) error {
 	if cfg.MaxAttempts < 1 {
 		cfg.MaxAttempts = 1
@@ -53,6 +55,18 @@ func retrySend(provider string, providerID int, cfg RetryConfig, send func() err
 		}
 
 		lastErr = err
+
+		// Постоянные ошибки — не тратим попытки впустую
+		if !isRetryable(err) {
+			log.Warn().
+				Str("provider", provider).
+				Int("provider_id", providerID).
+				Int("attempt", attempt).
+				Err(err).
+				Msg("Send failed with non-retryable error, giving up")
+			return err
+		}
+
 		log.Warn().
 			Str("provider", provider).
 			Int("provider_id", providerID).
@@ -71,9 +85,7 @@ func retrySend(provider string, providerID int, cfg RetryConfig, send func() err
 			sleep = cfg.MaxDelay
 		}
 
-		// Для 429 (rate limit) — увеличиваем паузу, чтобы дать серверу передышку.
-		// Matrix, Synapse и большинство API при 429 явно просят «подождать».
-		// Множитель подбираем так, чтобы при BaseDelay=5s пауза стала ~20s.
+		// Для 429 — увеличиваем паузу, чтобы дать серверу передышку.
 		if isRateLimited(err) {
 			sleep = sleep * 4
 			if sleep > cfg.MaxDelay {
@@ -91,6 +103,30 @@ func retrySend(provider string, providerID int, cfg RetryConfig, send func() err
 	}
 
 	return lastErr
+}
+
+// isRetryable решает, стоит ли повторять отправку при данной ошибке.
+// Возвращает false для постоянных ошибок авторизации и клиентских 4xx,
+// которые от повтора не изменятся.
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+
+	// Постоянные ошибки авторизации — retry бессмыслен
+	if strings.Contains(msg, "missing_token") ||
+		strings.Contains(msg, "unknown_token") ||
+		strings.Contains(msg, "forbidden") ||
+		strings.Contains(msg, "unauthorized") ||
+		strings.Contains(msg, "m_forbidden") ||
+		strings.Contains(msg, "m_unknown_token") {
+		return false
+	}
+
+	// Всё остальное — считаем временным и пробуем снова:
+	// сетевые сбои, таймауты, 429, 5xx и прочее.
+	return true
 }
 
 // isRateLimited определяет, похожа ли ошибка на HTTP 429 / Too Many Requests.

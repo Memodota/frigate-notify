@@ -32,13 +32,16 @@ func trySendMatrix(message string, idx int) error {
 		return err
 	}
 
+	// Extended timeout, self-signed certs if set
+	transport := &http.Transport{
+		ResponseHeaderTimeout: 60 * time.Second,
+	}
 	if profile.Insecure {
-		m.Client = &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	m.Client = &http.Client{
+		Timeout:   5 * time.Minute,
+		Transport: transport,
 	}
 
 	m.StateStore = mautrix.NewMemoryStateStore()
